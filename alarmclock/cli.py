@@ -58,21 +58,35 @@ def _cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _alarm_row(alarm: Alarm, now: datetime) -> dict:
+    next_str = ""
+    if alarm.enabled:
+        occurrence = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now)
+        next_str = f" (next: {occurrence.trigger_at.strftime('%a %H:%M')})"
+    return {
+        "status": "on " if alarm.enabled else "off",
+        "id": alarm.id,
+        "time": alarm.time[:5],
+        "repeat": ",".join(alarm.repeat) if alarm.repeat else "once",
+        "label": f' "{alarm.label}"' if alarm.label else "",
+        "next": next_str,
+    }
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     alarms = storage.load()
     if not alarms:
         print("No alarms set.")
         return 0
+
     now = datetime.now().astimezone()
-    for alarm in alarms:
-        status = "on " if alarm.enabled else "off"
-        repeat = ",".join(alarm.repeat) if alarm.repeat else "once"
-        label = f" \"{alarm.label}\"" if alarm.label else ""
-        next_str = ""
-        if alarm.enabled:
-            occurrence = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now)
-            next_str = f" (next: {occurrence.trigger_at.strftime('%a %H:%M')})"
-        print(f"[{status}] {alarm.id}  {alarm.time[:5]}  {repeat:8}{label}{next_str}")
+    rows = [_alarm_row(alarm, now) for alarm in alarms]
+    repeat_width = max(len(row["repeat"]) for row in rows)  # sized to what's actually listed
+    for row in rows:
+        print(
+            f"[{row['status']}] {row['id']}  {row['time']}  "
+            f"{row['repeat']:<{repeat_width}}{row['label']}{row['next']}"
+        )
     return 0
 
 

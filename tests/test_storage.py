@@ -1,7 +1,17 @@
+import types
+
 import pytest
 
 from alarmclock import storage
 from alarmclock.models import Alarm
+
+
+def _fake_msvcrt(calls):
+    return types.SimpleNamespace(
+        LK_LOCK="LOCK",
+        LK_UNLCK="UNLOCK",
+        locking=lambda fd, mode, nbytes: calls.append((mode, nbytes)),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -66,3 +76,45 @@ def test_multiple_alarms_get_distinct_ids():
     a2 = storage.add_alarm(Alarm(time="08:00:00"))
     assert a1.id != a2.id
     assert {a.id for a in storage.load()} == {a1.id, a2.id}
+
+
+# The following exercise the msvcrt (Windows) locking path by mocking the
+# module - there's no real Windows machine in this environment, so this
+# verifies the code calls the documented msvcrt API correctly, not that
+# Windows actually enforces the lock the way fcntl does on POSIX.
+
+
+def test_msvcrt_lock_region_writes_placeholder_byte_when_file_empty(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(storage, "msvcrt", _fake_msvcrt(calls))
+
+    lock_path = tmp_path / "test.lock"
+    with open(lock_path, "a+") as handle:
+        storage._msvcrt_lock_region(handle)
+        handle.seek(0)
+        assert handle.read() == "0"
+        storage._msvcrt_unlock_region(handle)
+
+    assert calls == [("LOCK", 1), ("UNLOCK", 1)]
+
+
+def test_msvcrt_lock_region_leaves_existing_content_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "msvcrt", _fake_msvcrt([]))
+
+    lock_path = tmp_path / "test.lock"
+    lock_path.write_text("x")
+    with open(lock_path, "r+") as handle:
+        storage._msvcrt_lock_region(handle)
+        handle.seek(0)
+        assert handle.read(1) == "x"
+
+
+def test_locked_uses_msvcrt_when_fcntl_unavailable(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(storage, "fcntl", None)
+    monkeypatch.setattr(storage, "msvcrt", _fake_msvcrt(calls))
+
+    with storage._locked(tmp_path / "alarms.json"):
+        pass
+
+    assert calls == [("LOCK", 1), ("UNLOCK", 1)]

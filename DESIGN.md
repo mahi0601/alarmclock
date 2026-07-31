@@ -64,8 +64,8 @@ fixed UTC offset would silently shift the alarm by an hour twice a year.
 | Recurring alarm, all repeat days are "in the past" this week | Wrap to next week; verified with a test where "now" is late Friday and the only repeat day is Monday. |
 | Invalid time format | Reject at `add` time with a clear error and non-zero exit code — fail fast, don't store garbage. |
 | Two `alarmclock run` processes started by mistake | PID lock file; second process refuses to start rather than double-firing alarms. |
-| Alarms file edited/added-to while `run` is already watching | Watcher polls the file's mtime each tick (short sleep chunks, not one long `sleep()`), so a new alarm added in another terminal is picked up without restarting the watcher. |
-| Concurrent writes to the alarms file (e.g. `add` run twice quickly) | Write-to-temp-file-then-atomic-rename, so a crash or race never leaves a half-written JSON file. |
+| Alarms file edited/added-to while `run` is already watching | Watcher reloads the alarms file every poll tick (short sleep chunks, not one long `sleep()`) and diffs the current alarm IDs against what it saw last tick, so a new alarm added in another terminal is picked up without restarting the watcher. |
+| Concurrent writes to the alarms file from separate processes (e.g. `add` run from two terminals at once) | Write-to-temp-file-then-atomic-rename for corruption-proofing, plus an advisory exclusive lock (`fcntl` on POSIX, `msvcrt` on Windows) around each read-modify-write so one write can't be lost under the other. Verified with a test that spawns real separate processes writing concurrently — and confirmed the test actually catches the bug by deliberately breaking the lock and watching it fail. |
 | Machine asleep / process not running when a one-off alarm's time passes | On startup, one-off alarms whose time is already more than a minute in the past are marked missed and disabled rather than firing immediately on wake — an alarm going off hours late is worse than not going off. |
 | `run` invoked in a non-interactive context (piped/no tty) | Skip the "press enter to dismiss/snooze" prompt (it would hang forever waiting on stdin); ring for a fixed duration and auto-dismiss. |
 | Sound playback fails (headless box, no audio device) | Caught narrowly (the specific subprocess/OS errors, not a bare `except`) and falls back to the terminal bell character, so a missing speaker never crashes the alarm. |
@@ -136,3 +136,41 @@ touching business logic. This tool has one storage backend, one entry point, and
 plausible near-term need for another; adding interfaces and DI around a single JSON file
 would be indirection with nothing on the other end of it. Section 2 already lays out the
 same principle for features — it applies to internal structure just as much.
+
+## 9. Closing the gaps a second look turned up
+
+Running `pyflakes` and testing against Python 3.9 directly (rather than only the 3.12 dev
+venv) turned up an unused import, an unused test variable, and confirmed the `>=3.9` claim
+in `pyproject.toml` was actually true rather than just asserted. Also found: `sound.py` had
+real per-platform branching with zero automated coverage — only "I heard a beep" during
+manual runs — so I added unit tests for each platform path and the bell fallback, injecting
+a fake `winsound` module via `sys.modules` so the Windows path is testable from any OS.
+
+Two more substantive gaps:
+
+- **`list`'s column alignment broke for long custom `--repeat` values** (`mon,tue,wed,thu,fri`
+  overflowed a hardcoded 8-character field). Fixed by computing the column width from what's
+  actually being displayed instead of a fixed guess.
+- **The concurrent-write locking was only tested for atomicity of a single write, never for
+  actually serializing concurrent writers.** Added `tests/test_concurrency.py`, which spawns
+  real separate OS processes (via `multiprocessing`, `spawn` start method — genuine
+  independent Python interpreters, not threads) hammering `add_alarm` on the same file at
+  once. To make sure this test had teeth rather than passing by coincidence, I temporarily
+  neutered the lock and reran it: it failed reliably (13-22 of 32 alarms survived instead of
+  32, i.e. writers clobbering each other), then passed again once the lock was restored. A
+  concurrency test that can't be shown to fail when the thing it protects is broken isn't
+  proving anything.
+
+One gap I closed partially, with the limitation stated rather than hidden: Windows file
+locking was fcntl-only (a no-op on Windows). Implemented a `msvcrt`-based path following the
+standard library docs, with unit tests that mock the `msvcrt` module to verify the code calls
+the documented API correctly. What that *doesn't* prove is that real Windows enforces the
+lock the way the tests assume — this project was built and tested on macOS, and I have no
+Windows machine to verify against. Said so plainly in the README rather than upgrading the
+limitations list to "fixed" on the strength of a mocked test alone. A gap that's real but
+untestable in the current environment should be labeled that way, not quietly closed.
+
+One item from the original limitations list I deliberately left alone: no launchd/systemd/
+Task Scheduler integration. That's not an oversight surfaced by more testing — it's the same
+scope boundary from §2 and §5, and building three untested OS-service integrations to
+"complete the list" would be scope creep dressed up as thoroughness.

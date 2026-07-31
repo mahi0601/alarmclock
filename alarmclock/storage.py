@@ -21,6 +21,11 @@ try:
 except ImportError:  # pragma: no cover - exercised only on Windows
     fcntl = None
 
+try:
+    import msvcrt  # Windows only
+except ImportError:  # pragma: no cover - exercised only on POSIX
+    msvcrt = None
+
 
 def data_dir() -> Path:
     override = os.environ.get("ALARMCLOCK_HOME")
@@ -37,23 +42,55 @@ def pid_lock_path() -> Path:
     return data_dir() / "run.lock"
 
 
+def _msvcrt_lock_region(handle) -> None:
+    """Lock byte 0 of `handle`, writing a placeholder byte if the file is empty.
+
+    msvcrt.locking() locks a byte range starting at the current file
+    position rather than the whole file (unlike flock), so there needs to be
+    at least one byte present to lock. LK_LOCK retries roughly once a second
+    for ~10 seconds before raising OSError, rather than blocking
+    indefinitely like flock's LOCK_EX - acceptable here since this lock is
+    only ever held for a brief read-modify-write of a small JSON file.
+
+    NOTE: implemented from the msvcrt documentation; this project was built
+    and tested on macOS, so this path has not been run on real Windows.
+    """
+    handle.seek(0)
+    if not handle.read(1):
+        handle.seek(0)
+        handle.write("0")
+        handle.flush()
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _msvcrt_unlock_region(handle) -> None:
+    handle.seek(0)
+    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 @contextlib.contextmanager
 def _locked(path: Path):
     """Advisory exclusive lock so concurrent CLI invocations don't interleave writes.
 
-    Falls back to no locking on platforms without fcntl (Windows); the
-    atomic rename in save() still prevents file corruption there, it just
-    doesn't serialize concurrent read-modify-write cycles.
+    Uses fcntl on POSIX and msvcrt on Windows. On any other platform this
+    falls back to no locking; the atomic rename in save() still prevents
+    file corruption there, it just doesn't serialize concurrent
+    read-modify-write cycles.
     """
     lock_file = path.with_suffix(path.suffix + ".op-lock")
     handle = open(lock_file, "a+")
     try:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            _msvcrt_lock_region(handle)
         yield
     finally:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            _msvcrt_unlock_region(handle)
         handle.close()
 
 

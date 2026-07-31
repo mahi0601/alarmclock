@@ -73,7 +73,11 @@ pytest
 The test suite focuses on the scheduling logic in `timeparse.py` — parsing,
 rollover to the next day/week, and DST transitions — since that's the part
 of an alarm clock that's actually easy to get subtly wrong, plus the storage
-layer's atomic-write and concurrent-access behavior.
+layer's atomic-write behavior, including a real multi-process concurrency
+test (`tests/test_concurrency.py`) that spawns separate OS processes writing
+to the same alarms file at once, and `sound.py`'s per-platform fallback
+logic. 79 tests total; also verified to pass on Python 3.9, not just the
+version it was developed against.
 
 ## Known limitations
 
@@ -81,10 +85,14 @@ layer's atomic-write and concurrent-access behavior.
   sleep, or log out, alarms won't fire. Building that properly means a
   launchd job on macOS, a systemd unit on Linux, and a Scheduled Task on
   Windows — three different mechanisms, out of scope for a CLI tool with no
-  daemon/service layer.
-- File locking during concurrent `add`/`remove` uses `fcntl`, which is
-  POSIX-only. On Windows, writes are still atomic (no corruption), but two
-  simultaneous CLI invocations aren't serialized against each other.
+  daemon/service layer. This one's a deliberate scope boundary, not
+  something left unfinished — see DESIGN.md §2 and §5.
+- File locking during concurrent `add`/`remove` uses `fcntl` on POSIX and
+  `msvcrt` on Windows. The Windows path was implemented from the standard
+  library docs and is covered by tests that mock the `msvcrt` module, but
+  this project was built and tested on macOS — it has not been run against
+  real Windows file locking, so treat it as best-effort until someone
+  verifies it there.
 - An alarm set for a wall-clock time that doesn't exist on a given day (the
   one hour skipped during a spring-forward DST transition) will fire at
   whatever the system's timezone library resolves it to rather than being
