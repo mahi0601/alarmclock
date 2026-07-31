@@ -75,7 +75,7 @@ def test_stale_one_off_from_before_startup_is_disabled_without_firing(monkeypatc
     ticks = [base + timedelta(seconds=s) for s in range(0, 10, 2)]
     _fake_clock(monkeypatch, ticks)
 
-    alarm = storage.add_alarm(Alarm(time="07:00:00"))
+    storage.add_alarm(Alarm(time="07:00:00"))
 
     fired = []
     monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id) or None)
