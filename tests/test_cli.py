@@ -45,8 +45,7 @@ def test_list_when_empty(capsys):
 
 def test_list_shows_added_alarm(capsys):
     main(["add", "--time", "07:00", "--label", "wake up", "--repeat", "weekdays"])
-    out = capsys.readouterr().out
-    capsys.readouterr()
+    capsys.readouterr()  # discard the add command's own output
     main(["list"])
     out = capsys.readouterr().out
     assert "07:00" in out

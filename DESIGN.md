@@ -43,12 +43,11 @@ deliberately didn't handle written down rather than silently ignored.
 
 ```
 Alarm:
-  id: str            # short, stable, user-facing (e.g. "a1b2")
-  time: "HH:MM"       # stored canonical 24h, local wall-clock time
-  label: str          # optional, defaults to ""
-  repeat: [str]        # weekday codes ("mon".."sun"); [] means one-off
+  id: str        # short, stable, user-facing (e.g. "a1b2")
+  time: str      # canonical "HH:MM:SS", 24h, local wall-clock
+  label: str     # optional, defaults to ""
+  repeat: [str]  # weekday codes ("mon".."sun"); [] means one-off
   enabled: bool
-  created_at: ISO 8601 timestamp
 ```
 
 Time is stored as local wall-clock ("7:00"), not as a UTC instant. This matters: a
@@ -174,3 +173,31 @@ One item from the original limitations list I deliberately left alone: no launch
 Task Scheduler integration. That's not an oversight surfaced by more testing — it's the same
 scope boundary from §2 and §5, and building three untested OS-service integrations to
 "complete the list" would be scope creep dressed up as thoroughness.
+
+## 10. A pass for things that only look correct
+
+A later re-read specifically for code that works but shouldn't have been written that way
+turned up:
+
+- **`Alarm.created_at`** — a timestamp field, set on every alarm, serialized to disk,
+  and never read anywhere: not displayed by `list`, not used by any sorting or expiry logic.
+  The kind of field that gets added because a data model "should probably" track creation
+  time, without an actual use case behind it. Removed, along with the now-unused
+  `datetime`/`timezone` import that only existed to compute it.
+- **This file's own data model block (§3) still said `time: "HH:MM"`** — the exact stale
+  claim §8 describes fixing in `models.py`'s comment, left uncorrected in the mirror copy
+  three sections up in the same document. Docs drift the same way code does; fixing an issue
+  in one place doesn't mean it's gone everywhere it was written down.
+- **A dead line and a no-op line in `tests/test_cli.py`**: `out = capsys.readouterr().out`
+  whose value was immediately overwritten and never read, followed by a bare
+  `capsys.readouterr()` call that discarded nothing (the previous line had already drained
+  the buffer) — leftover from an earlier version of the test that never got swept up.
+- **`lambda a: fired.append(a.id) or None`, three times in `tests/test_watcher.py`** —
+  `list.append()` already returns `None`, so `or None` was inert. A defensive habit copied
+  from patterns where the left side *can* return something truthy (`dict.update`, boolean
+  short-circuiting for a default), applied somewhere it does nothing.
+
+None of these were bugs — the tests still passed and the field didn't corrupt anything sitting
+unused in the JSON. That's exactly why they're worth naming separately from the bug in §7:
+working and correct aren't the same thing, and "the tests are green" doesn't catch a field
+nobody reads or a doc comment nobody updated.

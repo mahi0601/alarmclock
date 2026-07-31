@@ -41,7 +41,7 @@ def test_one_off_alarm_fires_once_wall_clock_reaches_it_then_disables(monkeypatc
     alarm = storage.add_alarm(Alarm(time="07:00:05"))
 
     fired = []
-    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id) or None)
+    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id))
 
     with pytest.raises(StopIteration):
         watcher.run_forever()
@@ -58,7 +58,7 @@ def test_recurring_alarm_reschedules_instead_of_disabling(monkeypatch):
     alarm = storage.add_alarm(Alarm(time="07:00:00", repeat=["fri"]))
 
     fired = []
-    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id) or None)
+    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id))
 
     with pytest.raises(StopIteration):
         watcher.run_forever()
@@ -78,7 +78,7 @@ def test_stale_one_off_from_before_startup_is_disabled_without_firing(monkeypatc
     storage.add_alarm(Alarm(time="07:00:00"))
 
     fired = []
-    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id) or None)
+    monkeypatch.setattr(watcher, "_fire", lambda a: fired.append(a.id))
 
     with pytest.raises(StopIteration):
         watcher.run_forever()
