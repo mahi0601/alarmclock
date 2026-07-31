@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alarmclock"
+version = "0.1.0"
+description = "A terminal alarm clock: multiple alarms, recurring schedules, no daemon required."
+requires-python = ">=3.9"
+readme = "README.md"
+
+[project.scripts]
+alarmclock = "alarmclock.cli:main"
+
+[tool.setuptools]
+packages = ["alarmclock"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
