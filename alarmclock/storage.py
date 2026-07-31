@@ -14,7 +14,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from .models import Alarm
+from .models import Alarm, generate_alarm_id
 
 try:
     import fcntl  # POSIX only
@@ -92,7 +92,7 @@ def add_alarm(alarm: Alarm) -> Alarm:
         alarms = load()
         existing_ids = {a.id for a in alarms}
         while alarm.id in existing_ids:  # extremely unlikely, but don't silently collide
-            alarm.id = type(alarm).__dataclass_fields__["id"].default_factory()
+            alarm.id = generate_alarm_id()
         alarms.append(alarm)
         save(alarms)
     return alarm

@@ -115,3 +115,24 @@ right now" — which is a different question with a different (and previously wr
 added/re-enabled). Covered by `tests/test_watcher.py`, which drives a fake clock through a
 fixed sequence of instants and asserts a fire actually happens — a test that would have
 caught this before it ever reached a real terminal.
+
+## 8. A cleanup pass, and why it stopped short of "Clean Architecture"
+
+After the implementation was working, I went back through it for straightforward clean-code
+issues: an unused import, a stale comment (`Alarm.time` documented as "HH:MM" when it's
+actually stored as "HH:MM:SS"), a misleadingly-named field (`rolled_to_tomorrow` used for
+alarms that could roll a full week forward, not just a day), a reflection hack
+(`type(alarm).__dataclass_fields__["id"].default_factory()`) that a plain function call does
+more plainly, and one function — `run_forever`'s main loop — that had grown to do three
+unrelated things at once (reconcile the schedule against the current alarm list, detect
+missed alarms, fire due alarms). That last one I split into `_sync_schedule` and
+`_fire_due_alarms`, each independently readable and already covered by the existing watcher
+tests since the split didn't change behavior.
+
+What I didn't do: restructure this into formal Clean Architecture (entities, use-case
+interactors, repository interfaces, dependency injection). That pattern earns its keep when
+infrastructure is genuinely swappable — e.g. swapping a JSON file for a database without
+touching business logic. This tool has one storage backend, one entry point, and no
+plausible near-term need for another; adding interfaces and DI around a single JSON file
+would be indirection with nothing on the other end of it. Section 2 already lays out the
+same principle for features — it applies to internal structure just as much.

@@ -6,31 +6,44 @@ from datetime import datetime, timedelta
 
 from . import storage
 from .models import Alarm
-from .timeparse import TimeParseError, parse_clock_time, parse_duration, parse_repeat, next_occurrence
+from .timeparse import (
+    TimeParseError,
+    next_occurrence,
+    parse_clock_time,
+    parse_duration,
+    parse_repeat,
+)
 from .watcher import AlreadyRunningError, run_forever
+
+RELATIVE_TIME_LIMIT = timedelta(hours=24)
+
+
+def _resolve_alarm_spec(time_text: str, repeat_text: str, now: datetime) -> tuple[str, list[str]]:
+    """Turn raw --time/--repeat input into (canonical "HH:MM:SS" time, repeat days).
+
+    Raises TimeParseError for anything invalid, including combinations that
+    parse fine individually but don't make sense together.
+    """
+    if not time_text.startswith("+"):
+        canonical = parse_clock_time(time_text).strftime("%H:%M:%S")
+        return canonical, parse_repeat(repeat_text)
+
+    if repeat_text:
+        raise TimeParseError("--repeat can't be combined with a relative time (+10m)")
+    delta = parse_duration(time_text)
+    if delta >= RELATIVE_TIME_LIMIT:
+        raise TimeParseError(
+            "relative times (+10m) only make sense within a day; "
+            "use --time HH:MM for anything further out"
+        )
+    canonical = (now + delta).strftime("%H:%M:%S")
+    return canonical, []
 
 
 def _cmd_add(args: argparse.Namespace) -> int:
     now = datetime.now().astimezone()
     try:
-        if args.time.startswith("+"):
-            if args.repeat:
-                print("error: --repeat can't be combined with a relative time (+10m)", file=sys.stderr)
-                return 2
-            delta = parse_duration(args.time)
-            if delta >= timedelta(hours=24):
-                print(
-                    "error: relative times (+10m) only make sense within a day; "
-                    "use --time HH:MM for anything further out",
-                    file=sys.stderr,
-                )
-                return 2
-            target = now + delta
-            canonical = target.strftime("%H:%M:%S")
-            repeat: list[str] = []
-        else:
-            canonical = parse_clock_time(args.time).strftime("%H:%M:%S")
-            repeat = parse_repeat(args.repeat)
+        canonical, repeat = _resolve_alarm_spec(args.time, args.repeat, now)
     except TimeParseError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -40,7 +53,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
     occurrence = next_occurrence(parse_clock_time(canonical), repeat, now)
     when = occurrence.trigger_at.strftime("%a %Y-%m-%d %H:%M")
-    note = " (already passed today, rolled to next occurrence)" if occurrence.rolled_to_tomorrow else ""
+    note = " (already passed today, rolled to next occurrence)" if occurrence.rolled_forward else ""
     print(f"Added alarm {alarm.id}: {canonical} -> next fires {when}{note}")
     return 0
 

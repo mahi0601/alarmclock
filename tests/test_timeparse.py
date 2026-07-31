@@ -90,13 +90,13 @@ class TestNextOccurrence:
         now = datetime(2026, 7, 31, 6, 0, tzinfo=NY)  # a Friday
         result = next_occurrence(time(7, 0), [], now)
         assert result.trigger_at == datetime(2026, 7, 31, 7, 0, tzinfo=NY)
-        assert result.rolled_to_tomorrow is False
+        assert result.rolled_forward is False
 
     def test_one_off_already_passed_rolls_to_tomorrow(self):
         now = datetime(2026, 7, 31, 8, 0, tzinfo=NY)
         result = next_occurrence(time(7, 0), [], now)
         assert result.trigger_at == datetime(2026, 8, 1, 7, 0, tzinfo=NY)
-        assert result.rolled_to_tomorrow is True
+        assert result.rolled_forward is True
 
     def test_one_off_exact_now_counts_as_passed(self):
         now = datetime(2026, 7, 31, 7, 0, tzinfo=NY)

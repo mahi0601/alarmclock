@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 from . import sound, storage
 from .models import Alarm
-from .timeparse import parse_clock_time, next_occurrence
+from .timeparse import TimeParseError, parse_clock_time, parse_duration, next_occurrence
 
 POLL_INTERVAL_SECONDS = 2
 MISSED_THRESHOLD = timedelta(seconds=60)
@@ -85,11 +85,11 @@ def _prompt_dismiss_or_snooze(alarm: Alarm) -> timedelta | None:
         return None
     if response in ("s", "snooze"):
         return DEFAULT_SNOOZE
+    if not response.startswith("+"):
+        response = "+" + response
     try:
-        from .timeparse import parse_duration
-
-        return parse_duration("+" + response if not response.startswith("+") else response)
-    except Exception:
+        return parse_duration(response)
+    except TimeParseError:
         print("  Didn't understand that; dismissing.", file=sys.stderr)
         return None
 
@@ -105,6 +105,80 @@ def _fire(alarm: Alarm) -> timedelta | None:
     finally:
         stop_event.set()
         ringer.join(timeout=2)
+
+
+def _warn_missed(alarm: Alarm) -> None:
+    label = f" ({alarm.label})" if alarm.label else ""
+    print(
+        f"[missed] '{alarm.time}'{label} was due while alarmclock wasn't running; "
+        "disabling it rather than firing it late.",
+        file=sys.stderr,
+    )
+
+
+def _sync_schedule(
+    alarms: list[Alarm],
+    now: datetime,
+    schedule: dict[str, datetime],
+    snoozes: dict[str, datetime],
+    known_ids: set[str],
+) -> bool:
+    """Bring `schedule` up to date with the current alarm list, in place.
+
+    Drops entries for alarms that were removed or disabled since the last
+    tick, and computes a fresh target time for any alarm seen for the first
+    time (at startup, or because it was just added/re-enabled). Returns
+    whether any alarm was auto-disabled as missed and needs saving.
+    """
+    alarms_by_id = {a.id: a for a in alarms}
+    for removed_id in known_ids - alarms_by_id.keys():
+        schedule.pop(removed_id, None)
+        snoozes.pop(removed_id, None)
+    known_ids.clear()
+    known_ids.update(alarms_by_id)
+
+    needs_save = False
+    for alarm in alarms:
+        if not alarm.enabled:
+            schedule.pop(alarm.id, None)
+            continue
+        if alarm.id in schedule:
+            continue
+        if _is_missed_one_off(alarm, now):
+            alarm.enabled = False
+            needs_save = True
+            _warn_missed(alarm)
+            continue
+        schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now).trigger_at
+    return needs_save
+
+
+def _fire_due_alarms(
+    alarms: list[Alarm],
+    now: datetime,
+    schedule: dict[str, datetime],
+    snoozes: dict[str, datetime],
+) -> None:
+    for alarm in alarms:
+        if not alarm.enabled:
+            continue
+        due = snoozes.get(alarm.id) or schedule.get(alarm.id)
+        if due is None or now < due:
+            continue
+
+        snoozes.pop(alarm.id, None)
+        snooze_for = _fire(alarm)
+        fired_at = datetime.now().astimezone()
+
+        if snooze_for:
+            snoozes[alarm.id] = fired_at + snooze_for
+            print(f"  Snoozed for {int(snooze_for.total_seconds() // 60)} min.")
+        elif alarm.repeat:
+            schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, fired_at).trigger_at
+        else:
+            alarm.enabled = False
+            storage.save(alarms)
+            schedule.pop(alarm.id, None)
 
 
 def run_forever() -> None:
@@ -127,52 +201,10 @@ def run_forever() -> None:
     while True:
         now = datetime.now().astimezone()
         alarms = storage.load()
-        alarms_by_id = {a.id: a for a in alarms}
-        dirty = False
 
-        for stale_id in known_ids - alarms_by_id.keys():
-            schedule.pop(stale_id, None)
-            snoozes.pop(stale_id, None)
-        known_ids = set(alarms_by_id)
-
-        for alarm in alarms:
-            if not alarm.enabled:
-                schedule.pop(alarm.id, None)
-                continue
-            if alarm.id in schedule:
-                continue
-            if _is_missed_one_off(alarm, now):
-                alarm.enabled = False
-                dirty = True
-                label = f" ({alarm.label})" if alarm.label else ""
-                print(
-                    f"[missed] '{alarm.time}'{label} was due while alarmclock wasn't "
-                    "running; disabling it rather than firing it late.",
-                    file=sys.stderr,
-                )
-                continue
-            schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now).trigger_at
-
-        if dirty:
+        if _sync_schedule(alarms, now, schedule, snoozes, known_ids):
             storage.save(alarms)
 
-        for alarm in alarms:
-            if not alarm.enabled:
-                continue
-            due = snoozes.get(alarm.id) or schedule.get(alarm.id)
-            if due is None or now < due:
-                continue
-            snoozes.pop(alarm.id, None)
-            snooze_for = _fire(alarm)
-            fired_at = datetime.now().astimezone()
-            if snooze_for:
-                snoozes[alarm.id] = fired_at + snooze_for
-                print(f"  Snoozed for {int(snooze_for.total_seconds() // 60)} min.")
-            elif alarm.repeat:
-                schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, fired_at).trigger_at
-            else:
-                alarm.enabled = False
-                storage.save(alarms)
-                schedule.pop(alarm.id, None)
+        _fire_due_alarms(alarms, now, schedule, snoozes)
 
         time_mod.sleep(POLL_INTERVAL_SECONDS)

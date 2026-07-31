@@ -5,17 +5,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 
-def _new_id() -> str:
+def generate_alarm_id() -> str:
     return secrets.token_hex(2)  # 4 hex chars, plenty for a handful of alarms
 
 
 @dataclass
 class Alarm:
-    time: str  # canonical "HH:MM" 24-hour, local wall-clock
+    time: str  # canonical "HH:MM:SS" 24-hour, local wall-clock
     label: str = ""
     repeat: list[str] = field(default_factory=list)  # weekday codes; [] = one-off
     enabled: bool = True
-    id: str = field(default_factory=_new_id)
+    id: str = field(default_factory=generate_alarm_id)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:

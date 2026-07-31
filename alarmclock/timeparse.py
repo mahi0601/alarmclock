@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAY_ALIASES = {
@@ -90,7 +90,7 @@ def parse_repeat(text: str | None) -> list[str]:
     codes = []
     for part in normalized.split(","):
         part = part.strip()
-        code = WEEKDAY_ALIASES.get(part, part[:3] if part[:3] in WEEKDAYS else None)
+        code = _weekday_code(part)
         if code is None:
             raise TimeParseError(
                 f"'{part}' is not a recognized day (use mon/tue/.../sun, 'daily', "
@@ -101,10 +101,18 @@ def parse_repeat(text: str | None) -> list[str]:
     return codes
 
 
+def _weekday_code(part: str) -> str | None:
+    if part in WEEKDAY_ALIASES:
+        return WEEKDAY_ALIASES[part]
+    if part[:3] in WEEKDAYS:
+        return part[:3]
+    return None
+
+
 @dataclass(frozen=True)
 class NextOccurrence:
     trigger_at: datetime
-    rolled_to_tomorrow: bool  # True if a one-off alarm's time had already passed today
+    rolled_forward: bool  # True if today's slot had already passed and this moved to a later day
 
 
 def next_occurrence(alarm_time: time, repeat: list[str], now: datetime) -> NextOccurrence:
@@ -118,9 +126,9 @@ def next_occurrence(alarm_time: time, repeat: list[str], now: datetime) -> NextO
 
     if not repeat:
         if today_candidate > now:
-            return NextOccurrence(today_candidate, rolled_to_tomorrow=False)
+            return NextOccurrence(today_candidate, rolled_forward=False)
         tomorrow = datetime.combine(now.date() + timedelta(days=1), alarm_time, tzinfo=now.tzinfo)
-        return NextOccurrence(tomorrow, rolled_to_tomorrow=True)
+        return NextOccurrence(tomorrow, rolled_forward=True)
 
     # Recurring: scan forward at most 7 days to find the next matching weekday
     # whose time hasn't already passed. Day 7 always matches today's weekday
@@ -131,6 +139,6 @@ def next_occurrence(alarm_time: time, repeat: list[str], now: datetime) -> NextO
             continue
         candidate = datetime.combine(day, alarm_time, tzinfo=now.tzinfo)
         if candidate > now:
-            return NextOccurrence(candidate, rolled_to_tomorrow=(offset > 0))
+            return NextOccurrence(candidate, rolled_forward=(offset > 0))
 
     raise AssertionError("unreachable: a repeating alarm always has a next occurrence")
