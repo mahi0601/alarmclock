@@ -59,23 +59,17 @@ def acquire_run_lock() -> None:
     atexit.register(lambda: lock_path.unlink(missing_ok=True))
 
 
-def _disable_missed_one_offs(alarms: list[Alarm], now: datetime) -> bool:
-    """A one-off alarm the process wasn't running to catch is disabled, not fired late."""
-    changed = False
-    for alarm in alarms:
-        if not alarm.enabled or alarm.repeat:
-            continue
-        candidate_today = datetime.combine(now.date(), parse_clock_time(alarm.time), tzinfo=now.tzinfo)
-        if now - candidate_today > MISSED_THRESHOLD:
-            alarm.enabled = False
-            changed = True
-            label = f" ({alarm.label})" if alarm.label else ""
-            print(
-                f"[missed] '{alarm.time}'{label} was due while alarmclock wasn't running; "
-                "disabling it rather than firing it late.",
-                file=sys.stderr,
-            )
-    return changed
+def _is_missed_one_off(alarm: Alarm, now: datetime) -> bool:
+    """True for a one-off alarm whose time passed more than a minute ago.
+
+    Used only when an alarm is first noticed (startup, or just added/re-enabled)
+    - a one-off going off hours late because the watcher wasn't running is worse
+    than it simply not going off.
+    """
+    if alarm.repeat:
+        return False
+    candidate_today = datetime.combine(now.date(), parse_clock_time(alarm.time), tzinfo=now.tzinfo)
+    return now - candidate_today > MISSED_THRESHOLD
 
 
 def _prompt_dismiss_or_snooze(alarm: Alarm) -> timedelta | None:
@@ -114,38 +108,71 @@ def _fire(alarm: Alarm) -> timedelta | None:
 
 
 def run_forever() -> None:
+    """Fire alarms as they come due.
+
+    `schedule` holds each enabled alarm's next trigger time, computed once
+    and left fixed until it's reached. This is deliberate: calling
+    next_occurrence(..., now) fresh on every tick would always hand back a
+    time strictly after that same `now`, so comparing it against `now` right
+    away could never be true - the alarm would never fire. Freezing the
+    target the first time an alarm is seen, and only recomputing it after it
+    actually fires, is what lets real elapsed time catch up to it.
+    """
     acquire_run_lock()
+    schedule: dict[str, datetime] = {}
     snoozes: dict[str, datetime] = {}
-    last_mtime = None
+    known_ids: set[str] = set()
     print(f"alarmclock watching {storage.alarms_path()} - press Ctrl+C to stop.")
 
     while True:
-        path = storage.alarms_path()
-        mtime = path.stat().st_mtime if path.exists() else None
-        alarms = storage.load()
         now = datetime.now().astimezone()
+        alarms = storage.load()
+        alarms_by_id = {a.id: a for a in alarms}
+        dirty = False
 
-        if mtime != last_mtime:
-            if _disable_missed_one_offs(alarms, now):
-                storage.save(alarms)
-            last_mtime = path.stat().st_mtime if path.exists() else mtime
+        for stale_id in known_ids - alarms_by_id.keys():
+            schedule.pop(stale_id, None)
+            snoozes.pop(stale_id, None)
+        known_ids = set(alarms_by_id)
+
+        for alarm in alarms:
+            if not alarm.enabled:
+                schedule.pop(alarm.id, None)
+                continue
+            if alarm.id in schedule:
+                continue
+            if _is_missed_one_off(alarm, now):
+                alarm.enabled = False
+                dirty = True
+                label = f" ({alarm.label})" if alarm.label else ""
+                print(
+                    f"[missed] '{alarm.time}'{label} was due while alarmclock wasn't "
+                    "running; disabling it rather than firing it late.",
+                    file=sys.stderr,
+                )
+                continue
+            schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now).trigger_at
+
+        if dirty:
+            storage.save(alarms)
+
         for alarm in alarms:
             if not alarm.enabled:
                 continue
-            snoozed_until = snoozes.get(alarm.id)
-            if snoozed_until and now < snoozed_until:
+            due = snoozes.get(alarm.id) or schedule.get(alarm.id)
+            if due is None or now < due:
                 continue
-            occurrence = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, now)
-            due = snoozed_until or occurrence.trigger_at
-            if now >= due:
-                snoozes.pop(alarm.id, None)
-                snooze_for = _fire(alarm)
-                if snooze_for:
-                    snoozes[alarm.id] = datetime.now().astimezone() + snooze_for
-                    print(f"  Snoozed for {int(snooze_for.total_seconds() // 60)} min.")
-                elif not alarm.repeat:
-                    alarm.enabled = False
-                    storage.save(alarms)
-                    last_mtime = path.stat().st_mtime
+            snoozes.pop(alarm.id, None)
+            snooze_for = _fire(alarm)
+            fired_at = datetime.now().astimezone()
+            if snooze_for:
+                snoozes[alarm.id] = fired_at + snooze_for
+                print(f"  Snoozed for {int(snooze_for.total_seconds() // 60)} min.")
+            elif alarm.repeat:
+                schedule[alarm.id] = next_occurrence(parse_clock_time(alarm.time), alarm.repeat, fired_at).trigger_at
+            else:
+                alarm.enabled = False
+                storage.save(alarms)
+                schedule.pop(alarm.id, None)
 
         time_mod.sleep(POLL_INTERVAL_SECONDS)

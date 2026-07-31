@@ -91,3 +91,27 @@ that's a real limitation, not a bug.
 7. Tests for the pure logic (`timeparse`) and storage, since those are where correctness
    actually matters; the CLI layer is thin and tested at the integration level.
 
+## 7. A real bug caught during testing
+
+The first version of the `run` loop recomputed each alarm's next occurrence on every poll
+tick by calling `next_occurrence(alarm_time, repeat, now)` with the *current* `now`, then
+compared that result back against the same `now`. `next_occurrence` is specified to always
+return a time strictly after whatever `now` it's given (that's what makes it correct for
+`add`/`list`, which want "when will this next go off"). Applied inside the firing loop, that
+same guarantee means the comparison could never be true — the computed time is by
+construction always slightly ahead of the `now` used to compute it, on every single tick.
+The watcher would sit there forever and never fire anything.
+
+This didn't show up in the `timeparse` unit tests (those test `next_occurrence` in
+isolation, correctly, against fixed `now` values) or in manual CLI smoke testing (`add`,
+`list`, `remove` all looked right). It only surfaced when I ran `alarmclock run` against a
+real near-future alarm and watched it silently do nothing.
+
+The fix: the watcher now computes each alarm's next trigger time once, when it first sees
+that alarm, and holds that value fixed across ticks. Each tick just asks "has real time
+reached the value I already computed", instead of asking "what's the next value, relative to
+right now" — which is a different question with a different (and previously wrong) answer.
+`schedule[alarm.id]` is only recomputed after the alarm actually fires (or when it's newly
+added/re-enabled). Covered by `tests/test_watcher.py`, which drives a fake clock through a
+fixed sequence of instants and asserts a fire actually happens — a test that would have
+caught this before it ever reached a real terminal.
