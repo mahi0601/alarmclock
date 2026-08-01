@@ -62,7 +62,7 @@ fixed UTC offset would silently shift the alarm by an hour twice a year.
 | DST transition between now and trigger | Compute next occurrence using timezone-aware local time (`zoneinfo`), not a fixed offset, so wall-clock time is preserved. |
 | Recurring alarm, all repeat days are "in the past" this week | Wrap to next week; verified with a test where "now" is late Friday and the only repeat day is Monday. |
 | Invalid time format | Reject at `add` time with a clear error and non-zero exit code — fail fast, don't store garbage. |
-| Two `alarmclock run` processes started by mistake | PID lock file; second process refuses to start rather than double-firing alarms. |
+| Two `alarmclock run` processes started at nearly the same instant | An atomic exclusive file create (`O_CREAT \| O_EXCL`), not a check-then-write, decides which one gets the PID lock — a real concurrent reproduction with 8-16 racing processes previously showed up to 7 of 8 wrongly believing they'd acquired it; that reproduction is now a passing regression test. |
 | Alarms file edited/added-to while `run` is already watching | Watcher reloads the alarms file every poll tick (short sleep chunks, not one long `sleep()`) and diffs the current alarm IDs against what it saw last tick, so a new alarm added in another terminal is picked up without restarting the watcher. |
 | Concurrent writes to the alarms file from separate processes (e.g. `add` run from two terminals at once) | Write-to-temp-file-then-atomic-rename for corruption-proofing, plus an advisory exclusive lock (`fcntl` on POSIX, `msvcrt` on Windows) around each read-modify-write so one write can't be lost under the other. Verified with a test that spawns real separate processes writing concurrently — and confirmed the test actually catches the bug by deliberately breaking the lock and watching it fail. |
 | Machine asleep / process not running when a one-off alarm's time passes | On startup, one-off alarms whose time is already more than a minute in the past are marked missed and disabled rather than firing immediately on wake — an alarm going off hours late is worse than not going off. |
@@ -201,3 +201,43 @@ None of these were bugs — the tests still passed and the field didn't corrupt 
 unused in the JSON. That's exactly why they're worth naming separately from the bug in §7:
 working and correct aren't the same thing, and "the tests are green" doesn't catch a field
 nobody reads or a doc comment nobody updated.
+
+## 11. Two more real bugs, found by trying to break it rather than re-read it
+
+A final pass, done by actively trying to construct failure scenarios instead of rereading code
+and trusting it, turned up two genuine correctness bugs — both confirmed by reproducing them for
+real before fixing, and both now covered by regression tests that were verified to fail against
+the old code and pass against the fix.
+
+**Disabling a snoozed alarm didn't clear its snooze.** `_sync_schedule`'s disabled-alarm branch
+popped the alarm out of `schedule` but not out of `snoozes`. Scenario: a one-off alarm fires, gets
+snoozed for 10 minutes; before those 10 minutes pass, it's disabled (`alarmclock disable`) and
+then re-enabled. Re-enabling recomputes a fresh, correct schedule entry (for tomorrow, say) — but
+the stale snooze entry from before the disable was never cleared, and `_fire_due_alarms` checks
+snooze before schedule. The alarm would go off at the old snooze time, ignoring the freshly
+computed schedule entirely. Reproduced directly against the internal functions, fixed with one
+added line (`snoozes.pop(alarm.id, None)` alongside the existing `schedule.pop`), and covered by
+`test_disable_then_reenable_during_a_snooze_drops_the_stale_snooze`.
+
+**The PID lock had a real startup race.** `acquire_run_lock` used to check `lock_path.exists()`
+and, if not, write its own PID — a classic check-then-write gap. Reproduced with 8-16 real
+separate processes (via `multiprocessing`, not threads) all calling `acquire_run_lock()` at
+nearly the same instant: in repeated trials, anywhere from 2 to all 8 of them wrongly believed
+they'd acquired the exclusive lock. Fixed by switching to an atomic `os.open(path, O_CREAT |
+O_EXCL)`, which the OS guarantees only one concurrent caller can succeed at. That surfaced a
+second, subtler issue on the way to fixing it: a process that loses the race and reads the lock
+file in the narrow window before the winner has actually written its PID into it sees an empty
+file, and the original code treated "can't parse a PID" as "nobody valid owns this, safe to take
+over" — which is exactly the bug, just moved one step later. Fixed by writing the PID
+immediately on the raw file descriptor (shrinking the window) and retrying the read briefly
+before concluding a lock is genuinely stale, rather than concluding that from a single read.
+Covered by `test_acquire_run_lock_serializes_across_real_concurrent_processes`, which — like the
+concurrency test in §9 — was confirmed to fail against the old code before it was confirmed to
+pass against the fix.
+
+Both bugs existed through every earlier pass in this log, including the "vibe-coded smells" pass
+in §10. Finding them took actually trying to break the code — constructing the specific sequence
+of operations (disable mid-snooze; two processes racing to start) that would expose them — rather
+than reading it in isolation and asking whether it looked right. Looking right and being right
+are different properties, and only one of them is checked by staring at code you already believe
+is correct.

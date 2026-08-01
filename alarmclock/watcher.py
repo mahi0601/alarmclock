@@ -15,6 +15,7 @@ import sys
 import threading
 import time as time_mod
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import sound, storage
 from .models import Alarm
@@ -42,20 +43,62 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _read_lock_pid(lock_path: Path) -> int | None:
+    try:
+        return int(lock_path.read_text().strip())
+    except (ValueError, OSError):
+        return None
+
+
+def _read_lock_pid_with_retry(lock_path: Path) -> int | None:
+    """Read the PID from a lock file that just failed an exclusive create.
+
+    The file existing doesn't mean its PID has been written yet - the
+    process that won the create() can still be a few instructions away from
+    actually writing into it. Treating an empty/unparseable read as "nobody
+    valid owns this, safe to take over" is exactly what let a losing process
+    steal the lock out from under the winner (caught by a real concurrent
+    reproduction, not just reasoning about it). Retrying briefly gives the
+    winner time to finish its write before this gives up and falls back to
+    treating the lock as genuinely stale.
+    """
+    for _ in range(10):
+        pid = _read_lock_pid(lock_path)
+        if pid is not None:
+            return pid
+        time_mod.sleep(0.01)
+    return None
+
+
 def acquire_run_lock() -> None:
+    """Ensure only one `run` process is active.
+
+    The common case - no lock file yet - uses an atomic exclusive create
+    (O_CREAT | O_EXCL) rather than a separate exists-check-then-write, so two
+    `alarmclock run` processes launched at nearly the same instant can't both
+    believe they got the lock. A plain "check, then write" would race exactly
+    like that; this doesn't, because the OS guarantees only one O_EXCL create
+    against the same path can succeed.
+    """
     lock_path = storage.pid_lock_path()
-    if lock_path.exists():
-        try:
-            existing_pid = int(lock_path.read_text().strip())
-        except (ValueError, OSError):
-            existing_pid = None
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        existing_pid = _read_lock_pid_with_retry(lock_path)
         if existing_pid and existing_pid != os.getpid() and _pid_alive(existing_pid):
             raise AlreadyRunningError(
                 f"alarmclock run is already active (pid {existing_pid}). "
                 "Stop it before starting another, or delete "
                 f"{lock_path} if you're sure it's stale."
             )
-    lock_path.write_text(str(os.getpid()))
+        lock_path.write_text(str(os.getpid()))  # stale lock from a dead process; take it over
+    else:
+        # Write immediately on the raw fd, before anything else, to make the
+        # window where the file exists but has no PID in it as small as
+        # possible for any concurrent reader on the FileExistsError path above.
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+
     atexit.register(lambda: lock_path.unlink(missing_ok=True))
 
 
@@ -141,6 +184,7 @@ def _sync_schedule(
     for alarm in alarms:
         if not alarm.enabled:
             schedule.pop(alarm.id, None)
+            snoozes.pop(alarm.id, None)
             continue
         if alarm.id in schedule:
             continue

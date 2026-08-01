@@ -73,11 +73,13 @@ pytest
 The test suite focuses on the scheduling logic in `timeparse.py` — parsing,
 rollover to the next day/week, and DST transitions — since that's the part
 of an alarm clock that's actually easy to get subtly wrong, plus the storage
-layer's atomic-write behavior, including a real multi-process concurrency
-test (`tests/test_concurrency.py`) that spawns separate OS processes writing
-to the same alarms file at once, and `sound.py`'s per-platform fallback
-logic. 79 tests total; also verified to pass on Python 3.9, not just the
-version it was developed against.
+layer's atomic-write behavior, a real multi-process concurrency test
+(`tests/test_concurrency.py`) that spawns separate OS processes writing to
+the same alarms file at once, `sound.py`'s per-platform fallback logic, and
+a real multi-process race test for the `run` PID lock (see DESIGN.md §11 —
+that one caught an actual startup race between two `run` processes). 84
+tests total; also verified to pass on Python 3.9, not just the version it
+was developed against.
 
 ## Known limitations
 
